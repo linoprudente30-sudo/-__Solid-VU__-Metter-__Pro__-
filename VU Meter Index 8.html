@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Solid VU Meter Pro</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+        body { background-color: #000; color: #fff; font-family: sans-serif; overflow: hidden; height: 100vh; width: 100vw; display: flex; flex-direction: column; }
+        header { background: #111; padding: 5px 15px; display: flex; justify-content: space-between; align-items: center; height: 45px; border-bottom: 1px solid #333; position: relative; z-index: 10; }
+        .logo { font-size: 12px; font-weight: bold; letter-spacing: 2px; }
+        .controls { display: flex; gap: 8px; align-items: center; }
+        button { background: #222; border: 1px solid #444; color: white; padding: 5px 10px; border-radius: 4px; font-size: 10px; font-weight: bold; cursor: pointer; }
+        button.active { border-color: #00f0ff; color: #00f0ff; }
+        
+        /* Settings panel overlay styling */
+        .settings-panel { position: absolute; top: 50px; right: 15px; background: rgba(15, 15, 15, 0.95); border: 1px solid #333; border-radius: 6px; padding: 15px; display: none; flex-direction: column; gap: 12px; width: 230px; z-index: 100; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        .settings-panel.show { display: flex; }
+        .setting-group { display: flex; flex-direction: column; gap: 5px; }
+        .setting-group label { font-size: 10px; font-weight: bold; color: #aaa; letter-spacing: 1px; text-transform: uppercase; }
+        .setting-group select { background: #222; border: 1px solid #444; color: white; padding: 5px; border-radius: 4px; font-size: 11px; outline: none; cursor: pointer; }
+        .reset-btn { background: #441111; border-color: #aa3333; color: #ff9999; margin-top: 5px; }
+        .reset-btn:hover { background: #661111; }
+
+        canvas { display: block; width: 100%; height: calc(100vh - 45px); background: #000; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="logo">SOLID VU METER</div>
+        <div class="controls">
+            <button id="mBtn" onclick="initMic()">🎙️ MIC SYNC</button>
+            <button onclick="document.getElementById('aud').click()">🎵 UPLOAD</button>
+            <button id="sBtn" onclick="toggleSettings()">⚙️ SETTINGS</button>
+        </div>
+
+        <div class="settings-panel" id="settingsPanel">
+            <div class="setting-group">
+                <label>Color Scheme</label>
+                <select id="colorSelect" onchange="updateSettings()">
+                    <option value="bluered">Blue and Red (Original)</option>
+                    <option value="greenyellowred">Green Yellow Red</option>
+                    <option value="orangered">Orange Red</option>
+                </select>
+            </div>
+            <div class="setting-group">
+                <label>Display Layout</label>
+                <select id="displaySelect" onchange="updateSettings()">
+                    <option value="vertical">Vertical (Original)</option>
+                    <option value="horizontal">Horizontal</option>
+                </select>
+            </div>
+            <button class="reset-btn" onclick="resetAllSettings()">🔄 RESET ALL SETTINGS</button>
+        </div>
+    </header>
+
+    <canvas id="canvas"></canvas>
+    <input type="file" id="aud" hidden accept="audio/*" onchange="handleFile(event)">
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let audioCtx, analyserL, analyserR, source, splitter;
+        let isMic = false;
+        
+        // VU Configuration state values
+        let cfgColor = "bluered";
+        let cfgDisplay = "vertical";
+
+        // VU Physics / tracking positions
+        let leftPeak = 0, rightPeak = 0;
+        let leftPeakHold = 0, rightPeakHold = 0;
+        let peakHoldTimerL = 0, peakHoldTimerR = 0;
+
+        function setup() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                
+                // Create individual analysers for true stereo reading
+                analyserL = audioCtx.createAnalyser();
+                analyserR = audioCtx.createAnalyser();
+                
+                analyserL.fftSize = 256; 
+                analyserR.fftSize = 256;
+                
+                analyserL.smoothingTimeConstant = 0.75;
+                analyserR.smoothingTimeConstant = 0.75;
+                
+                splitter = audioCtx.createChannelSplitter(2);
+            }
+        }
+
+        window.onresize = () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight - 45; };
+        window.onresize();
+
+        function toggleSettings() {
+            document.getElementById('settingsPanel').classList.toggle('show');
+            document.getElementById('sBtn').classList.toggle('active');
+        }
+
+        function updateSettings() {
+            cfgColor = document.getElementById('colorSelect').value;
+            cfgDisplay = document.getElementById('displaySelect').value;
+        }
+
+        function resetAllSettings() {
+            document.getElementById('colorSelect').value = "bluered";
+            document.getElementById('displaySelect').value = "vertical";
+            updateSettings();
+            document.getElementById('settingsPanel').classList.remove('show');
+            document.getElementById('sBtn').classList.remove('active');
+        }
+
+        async function initMic() {
+            setup();
+            try {
+                if (audioCtx.state === 'suspended') {
+                    await audioCtx.resume();
+                }
+                const constraints = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2 } };
+                const s = await navigator.mediaDevices.getUserMedia(constraints);
+                
+                if (source) source.disconnect();
+                
+                source = audioCtx.createMediaStreamSource(s);
+                source.connect(splitter);
+                
+                splitter.connect(analyserL, 0, 0);
+                splitter.connect(analyserR, 1, 0);
+                
+                document.getElementById('mBtn').classList.add('active');
+                isMic = true;
+                draw();
+            } catch (err) { console.error("Microphone access denied:", err); }
+        }
+
+        async function handleFile(e) {
+            setup();
+            const url = URL.createObjectURL(e.target.files[0]);
+            const a = new Audio(url);
+            
+            if (source) source.disconnect();
+            
+            source = audioCtx.createMediaElementSource(a);
+            source.connect(splitter);
+            
+            splitter.connect(analyserL, 0, 0);
+            splitter.connect(analyserR, 1, 0);
+            
+            source.connect(audioCtx.destination);
+            
+            // FIX: Force browser to wake up audio engine on user action
+            if (audioCtx.state === 'suspended') {
+                await audioCtx.resume();
+            }
+            
+            a.play();
+            isMic = false;
+            draw();
+        }
+
+        function amplitudeToPos(db, minDb, maxDb, startPos, endPos) {
+            if (db < minDb) db = minDb;
+            if (db > maxDb) db = maxDb;
+            const pct = (db - minDb) / (maxDb - minDb);
+            return startPos + (pct * (endPos - startPos));
+        }
+
+        function draw() {
+            requestAnimationFrame(draw);
+            if (!analyserL || !analyserR) return;
+
+            let dataArrayL = new Uint8Array(analyserL.frequencyBinCount);
+            let dataArrayR = new Uint8Array(analyserR.frequencyBinCount);
+            
+            analyserL.getByteTimeDomainData(dataArrayL);
+            analyserR.getByteTimeDomainData(dataArrayR);
+
+            // Compute Left Channel RMS
+            let totalL = 0;
+            for (let i = 0; i < dataArrayL.length; i++) {
+                let valL = (dataArrayL[i] - 128) / 128;
+                totalL += valL * valL;
+            }
+            let rmsL = Math.sqrt(totalL / dataArrayL.length);
+
+            // Compute Right Channel RMS
+            let totalR = 0;
+            for (let i = 0; i < dataArrayR.length; i++) {
+                let valR = (dataArrayR[i] - 128) / 128;
+                totalR += valR * valR;
+            }
+            let rmsR = Math.sqrt(totalR / dataArrayR.length);
+
+            let boost = isMic ? 2.2 : 1.5;
+            let dbL = rmsL > 0 ? 20 * Math.log10(rmsL) * boost + 6 : -40; 
+            let dbR = rmsR > 0 ? 20 * Math.log10(rmsR) * boost + 6 : -40;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // COLOR PROFILE MANAGER
+            let trackLowColor, trackHighColor, activeLowColor, activeHighColor;
+            if (cfgColor === "bluered") {
+                trackLowColor = '#062024';  trackHighColor = '#1c0404';
+                activeLowColor = '#00f0ff'; activeHighColor = '#9e2424';
+            } else if (cfgColor === "greenyellowred") {
+                trackLowColor = '#051a05';  trackHighColor = '#1c0404';
+                activeLowColor = '#00ff00'; activeHighColor = '#ff0000';
+            } else if (cfgColor === "orangered") {
+                trackLowColor = '#241002';  trackHighColor = '#1c0404';
+                activeLowColor = '#ff6a00'; activeHighColor = '#ff0000';
+            }
+
+            const minDb = -16, maxDb = 12;
+            const thresholdDb = 2; 
+
+            if (cfgDisplay === "vertical") {
+                // VERTICAL RENDER ENGINE
+                const meterHeight = canvas.height * 0.85;
+                const meterWidth = Math.min(30, canvas.width * 0.07);
+                const meterSpacing = 12;
+                const scaleWidth = 45;
+
+                const totalWidth = (meterWidth * 2) + meterSpacing + scaleWidth;
+                const startX = (canvas.width - totalWidth) / 2;
+                const mTop = (canvas.height - meterHeight) / 2;
+                const mBottom = mTop + meterHeight;
+
+                const leftX = startX + scaleWidth;
+                const rightX = leftX + meterWidth + meterSpacing;
+
+                const targetYL = amplitudeToPos(dbL, minDb, maxDb, mBottom, mTop);
+                const targetYR = amplitudeToPos(dbR, minDb, maxDb, mBottom, mTop);
+                const zeroY = amplitudeToPos(thresholdDb, minDb, maxDb, mBottom, mTop);
+
+                leftPeak = leftPeak * 0.88 + targetYL * 0.12;
+                rightPeak = rightPeak * 0.88 + targetYR * 0.12;
+
+                if (leftPeak <= leftPeakHold) { leftPeakHold = leftPeak; peakHoldTimerL = 45; } 
+                else { if (peakHoldTimerL > 0) peakHoldTimerL--; else leftPeakHold = leftPeakHold * 0.97 + mBottom * 0.03; }
+                if (rightPeak <= rightPeakHold) { rightPeakHold = rightPeak; peakHoldTimerR = 45; } 
+                else { if (peakHoldTimerR > 0) peakHoldTimerR--; else rightPeakHold = rightPeakHold * 0.97 + mBottom * 0.03; }
+
+                ctx.fillStyle = trackLowColor;
+                ctx.fillRect(leftX, zeroY, meterWidth, mBottom - zeroY);
+                ctx.fillRect(rightX, zeroY, meterWidth, mBottom - zeroY);
+                ctx.fillStyle = trackHighColor;
+                ctx.fillRect(leftX, mTop, meterWidth, zeroY - mTop);
+                ctx.fillRect(rightX, mTop, meterWidth, zeroY - mTop);
+
+                if (leftPeak < mBottom) {
+                    ctx.fillStyle = activeLowColor;
+                    ctx.fillRect(leftX, Math.max(leftPeak, zeroY), meterWidth, mBottom - Math.max(leftPeak, zeroY));
+                    if (cfgColor === "greenyellowred" && leftPeak < zeroY) {
+                        ctx.fillStyle = '#ffff00'; 
+                        ctx.fillRect(leftX, zeroY, meterWidth, Math.min(leftPeak - zeroY, 25));
+                    }
+                }
+                if (rightPeak < mBottom) {
+                    ctx.fillStyle = activeLowColor;
+                    ctx.fillRect(rightX, Math.max(rightPeak, zeroY), meterWidth, mBottom - Math.max(rightPeak, zeroY));
+                    if (cfgColor === "greenyellowred" && rightPeak < zeroY) {
+                        ctx.fillStyle = '#ffff00';
+                        ctx.fillRect(rightX, zeroY, meterWidth, Math.min(rightPeak - zeroY, 25));
+                    }
+                }
+                if (leftPeak < zeroY) {
+                    ctx.fillStyle = activeHighColor;
+                    ctx.fillRect(leftX, Math.max(leftPeak, mTop), meterWidth, zeroY - Math.max(leftPeak, mTop));
+                }
+                if (rightPeak < zeroY) {
+                    ctx.fillStyle = activeHighColor;
+                    ctx.fillRect(rightX, Math.max(rightPeak, mTop), meterWidth, zeroY - Math.max(rightPeak, mTop));
+                }
+
+                ctx.fillStyle = '#e8d44d';
+                if (leftPeakHold < mBottom - 2) ctx.fillRect(leftX, leftPeakHold, meterWidth, 2);
+                if (rightPeakHold < mBottom - 2) ctx.fillRect(rightX, rightPeakHold, meterWidth, 2);
+
+                const dbTicks = [12, 8, 4, 0, -4, -8, -12];
+                ctx.font = '12px sans-serif'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+                dbTicks.forEach(tick => {
+                    const tickY = amplitudeToPos(tick, minDb, maxDb, mBottom, mTop);
+                    ctx.fillStyle = '#fff'; ctx.fillText(tick >= 0 ? '+' + tick : tick, startX + scaleWidth - 10, tickY);
+                    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.beginPath();
+                    ctx.moveTo(startX + scaleWidth - 6, tickY); ctx.lineTo(startX + scaleWidth, tickY); ctx.stroke();
+                });
+                ctx.fillStyle = '#888'; ctx.font = '10px sans-serif'; ctx.fillText('dB', startX + scaleWidth - 10, mBottom + 15);
+
+            } else {
+                // HORIZONTAL RENDER ENGINE
+                const meterWidth = canvas.width * 0.80;
+                const meterHeight = Math.min(30, canvas.height * 0.07);
+                const meterSpacing = 12;
+                const scaleHeight = 25;
+
+                const totalHeight = (meterHeight * 2) + meterSpacing + scaleHeight;
+                const startY = (canvas.height - totalHeight) / 2;
+                const mLeft = (canvas.width - meterWidth) / 2;
+                const mRight = mLeft + meterWidth;
+
+                const leftY = startY + scaleHeight;
+                const rightY = leftY + meterHeight + meterSpacing;
+
+                const targetXL = amplitudeToPos(dbL, minDb, maxDb, mLeft, mRight);
+                const targetXR = amplitudeToPos(dbR, minDb, maxDb, mLeft, mRight);
+                const zeroX = amplitudeToPos(thresholdDb, minDb, maxDb, mLeft, mRight);
+
+                leftPeak = leftPeak * 0.88 + targetXL * 0.12;
+                rightPeak = rightPeak * 0.88 + targetXR * 0.12;
+
+                if (leftPeak >= leftPeakHold) { leftPeakHold = leftPeak; peakHoldTimerL = 45; } 
+                else { if (peakHoldTimerL > 0) peakHoldTimerL--; else leftPeakHold = leftPeakHold * 0.97 + mLeft * 0.03; }
+                if (rightPeak >= rightPeakHold) { rightPeakHold = rightPeak; peakHoldTimerR = 45; } 
+                else { if (peakHoldTimerR > 0) peakHoldTimerR--; else rightPeakHold = rightPeakHold * 0.97 + mLeft * 0.03; }
+
+                ctx.fillStyle = trackLowColor;
+                ctx.fillRect(mLeft, leftY, zeroX - mLeft, meterHeight);
+                ctx.fillRect(mLeft, rightY, zeroX - mLeft, meterHeight);
+                ctx.fillStyle = trackHighColor;
+                ctx.fillRect(zeroX, leftY, mRight - zeroX, meterHeight);
+                ctx.fillRect(zeroX, rightY, mRight - zeroX, meterHeight);
+
+                if (leftPeak > mLeft) {
+                    ctx.fillStyle = activeLowColor;
+                    ctx.fillRect(mLeft, leftY, Math.min(leftPeak, zeroX) - mLeft, meterHeight);
+                }
+                if (rightPeak > mLeft) {
+                    ctx.fillStyle = activeLowColor;
+                    ctx.fillRect(mLeft, rightY, Math.min(rightPeak, zeroX) - mLeft, meterHeight);
+                }
+                if (leftPeak > zeroX) {
+                    ctx.fillStyle = activeHighColor;
+                    ctx.fillRect(zeroX, leftY, leftPeak - zeroX, meterHeight);
+                }
+                if (rightPeak > zeroX) {
+                    ctx.fillStyle = activeHighColor;
+                    ctx.fillRect(zeroX, rightY, rightPeak - zeroX, meterHeight);
+                }
+
+                ctx.fillStyle = '#e8d44d';
+                if (leftPeakHold > mLeft + 2) ctx.fillRect(leftPeakHold, leftY, 2, meterHeight);
+                if (rightPeakHold > mLeft + 2) ctx.fillRect(rightPeakHold, rightY, 2, meterHeight);
+
+                const dbTicks = [-12, -8, -4, 0, 4, 8, 12];
+                ctx.font = '12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+                dbTicks.forEach(tick => {
+                    const tickX = amplitudeToPos(tick, minDb, maxDb, mLeft, mRight);
+                    ctx.fillStyle = '#fff'; ctx.fillText(tick >= 0 ? '+' + tick : tick, tickX, startY + scaleHeight - 8);
+                    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.beginPath();
+                    ctx.moveTo(tickX, startY + scaleHeight - 5); ctx.lineTo(tickX, startY + scaleHeight); ctx.stroke();
+                });
+                ctx.fillStyle = '#888'; ctx.font = '10px sans-serif'; ctx.textAlign = 'left';
+                ctx.fillText('dB', mRight + 10, startY + scaleHeight - 2);
+            }
+        }
+    </script>
+</body>
+</html>
